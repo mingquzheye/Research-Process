@@ -1,0 +1,121 @@
+%% Channel Estimation_for LS/DFT Channel Estimation with linear/Spline interpolation
+
+% clear all;
+close all;
+clc
+clf                                                                        % 清除当前图像窗口
+
+%% Paramter Setting
+Nfft = 32;                                                                 % FFT点数32
+Ng = Nfft/8;                                                               % 循环前缀点数8
+Nofdm = Nfft + Ng;                                                         % 一个OFDM符号总共有32+8=40点
+Nsym = 100;                                                                % OFDM个数目为100个
+Nps = 4;                                                                   % 导频间隔4
+Np = Nfft/Nps;                                                             % 导频数8
+Nbps = 4;
+M = 2^Nbps;                                                                % 每个（已调制）符号的位数16
+
+% mod_object = modem.qammod('M',M,'SymbolOrder','gray');
+% 调制参数,modem.qammod已经被matlab高级版本删除,直接使用qammod调制即可
+% demod_object = modem.qamdemod('M',M,'SymbolOrder','gray');              
+% 解调参数,modem,qamdemod已经被matlab高级版本删除,直接使用deqammod解调即可
+
+Es = 1;                                                                    % 信号能量
+A = sqrt(3/2/(M-1)*Es);                                                    % QAM归一化因子 
+SNR = 30;                                                                  % 信噪比30dB
+sq2 = sqrt(2);                                                             % 根号2
+MSE = zeros(1,6);                                                          % MSE初始化
+nose = 0;                                                                  % BER累加初始值
+
+%% Transmit Data Generation
+for nsym = 1:Nsym
+    Xp = 2*(randn(1,Np)>0)-1;                                              % 导频序列                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  % 生成导频序列(每个元素为1和-1组成的行向量)
+    % msgint = randint(1,Nfft-Np,M);                                       % randint 函数已经被matlab高级版本删除
+    msgint = randi([0,M-1],[1,Nfft-Np]);                                   % 生成比特数据（bit generation）
+    % Data = A*modulate(mod_object,msgint)      
+    % 调用参数对msgint进行QAM调制，但是这种用法已经被matlab高级版删除
+    Data = A*qammod(msgint,M,'gray');                                      % QAM调制
+    ip = 0;                                                                % 计数器（计导频的数）
+    pilot_loc = [];                                                        % 导频位置
+    for k = 1:Nfft
+        if mod(k,Nps)==1
+            X(k) = Xp(floor(k/Nps)+1);                                     % 将导频符号插入X矩阵
+            pilot_loc = [pilot_loc k];                                     % 记录导频符号的位置
+            ip = ip + 1;                                                   % 导频计数器计+1
+        else
+            X(k) = Data(k-ip);                                             % 插入数据符号
+        end
+    end   
+
+%% IFFT And Add CP
+    x = ifft(X,Nfft);                                                      % 对将频域矩阵X变换到时域
+    xt = [x(Nfft-Ng+1:Nfft) x];                                            % 添加循环前缀（将最后的循环前缀数目个子载波放到数据前面）
+
+%% Channel Parameters
+    h = [(randn+1i*randn) (randn+1i*randn)/2];                             % 这是一个2抽头的信道模型
+    H = fft(h,Nfft);                                                       % 信道的时域表示
+    ch_length = length(h);                                                 % 真实信道和信道长度
+    H_power_dB = 10*log10(abs(H.*conj(H)));                                % 注意函数是log10(x),dB是10log10(功率),这里的功率单位为W
+
+%% Go Through The Channel
+    y_channel = conv(xt,h);                                                % 通过信道之后的信号
+    yt = awgn(y_channel,SNR,'measured');                                   % 添加高斯白噪声
+
+%% Remove CP and FFT
+    y = yt(Ng+1:Nofdm);                                                    % 移除循环前缀
+    Y = fft(y);                                                            % 将时域矩阵y变换到频域
+
+%% LS And MMSE Channel Eatimation
+    for m = 1:3
+        if m == 1
+           H_est = LS_CE(Y,Xp,pilot_loc,Nfft,Nps,'linear');                % 基于线性插值的LS信道估计
+           method = 'LS-linear';
+        elseif m == 2
+               H_est = LS_CE(Y,Xp,pilot_loc,Nfft,Nps,'spline');            % 基于样条插值的LS信道估计
+               method = 'LS-spline';
+        else
+               H_est = MMSE_CE(Y,Xp,pilot_loc,Nfft,Nps,h,SNR);
+               method = 'MMSE';                                            % MMSE 信道估计
+        end
+
+    H_est_power_dB = 10*log10(abs(H_est.*conj(H_est)));                    % 估计的信道能量
+    h_est = ifft(H_est);                                                   % 估计的信道响应的时域表示
+
+%% DFT_based Channel Estimation
+    h_DFT = h_est(1:ch_length);
+    H_DFT = fft(h_DFT,Nfft);                                               % 基于DFT的信道估计
+    H_DFT_power_dB = 10*log10(abs(H_DFT.*conj(H_DFT)));                    % 基于DFT的信道估计估计出的信道能量
+
+    if nsym == 1
+        subplot(319+2*m),plot(H_power_dB,'b');                             % 321 323 325分割figure生成3行2列的子图
+        hold on;                                                           % 在135子图处先画真实信道的能量图，再画估计出的信道的能量图
+        plot(H_est_power_dB,'r:+');
+        legend('True Channel',method);
+   
+        subplot(320+2*m),plot(H_power_dB,'b');                             % 322 324 326分割figure生成为3行2列的子图
+        hold on;                                                           % 在246子图处先画真实信道的能量图，再画DFT优化后估计出的信道能量图
+        plot(H_DFT_power_dB,'r:+');
+        legend('True Channel',[method ' with DFT']);
+    end
+
+    MSE(m) = MSE(m) + (H-H_est)*(H-H_est)';                                % 记录每种方法对应的MSE值累加（3种分别对应：LS-linear LS-spine MMSE）
+    MSE(m+3)= MSE(m+3) + (H-H_DFT)*(H-H_DFT)';                             % 记录DFT更正后的对应的MSE值累加（3种分别对应：LS-linear-DFT LS-spline-DFT MMSE-DFT）
+    end
+    
+    Y_eq = Y./H_est;                                                       % ZF均衡
+    ip = 0;
+    
+    for k = 1:Nfft
+        if mod(k,Nps)==1
+            ip = ip + 1;
+        else
+            Data_extracted(k-ip)=Y_eq(k);                                  % 取出恢复后的数据流
+        end
+    end
+    
+    % msg_detected = demodulate(demod_object,Data_extracted/A);
+    % 解调，要注意的是这个用法已经被新版本matlab删除了
+    msg_detected = qamdemod(Data_extracted/A,M,'gray');                    % 数据流解调
+    nose = nose + sum(msg_detected ~= msgint);                             % 求BER
+    MSEs = MSE/(Nfft*Nsym);
+end
